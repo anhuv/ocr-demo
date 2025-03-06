@@ -75,24 +75,20 @@ class OCRProcessor:
 
     def _get_file_content(self, file_input: Union[str, object]) -> bytes:
         try:
-            if isinstance(file_input, str):  # File path
+            if isinstance(file_input, str) and file_input.startswith(("http://", "https://")):
+                # Handle URLs
+                response = requests.get(file_input, timeout=10)
+                response.raise_for_status()
+                return response.content
+            elif isinstance(file_input, str):  # File path
                 with open(file_input, "rb") as f:
                     return f.read()
             elif hasattr(file_input, 'read'):  # File-like object
                 return file_input.read()
             else:
-                raise ValueError("Invalid file input: must be a path or file-like object")
+                raise ValueError("Invalid file input: must be a URL, path, or file-like object")
         except Exception as e:
             logger.error(f"Error getting file content: {str(e)}")
-            raise
-
-    def _fetch_url_content(self, url: str) -> bytes:
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.content
-        except requests.RequestException as e:
-            logger.error(f"Error fetching URL {url}: {str(e)}")
             raise
 
     def ocr_pdf_url(self, pdf_url: str) -> str:
@@ -182,6 +178,8 @@ class OCRProcessor:
                 content = chat_response.choices[0].message.content if chat_response.choices else "{}"
                 try:
                     response_dict = json.loads(content)
+                    if isinstance(response_dict, list):  # Handle unexpected list response
+                        response_dict = response_dict[0] if response_dict else {}
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON response from chat API")
                     response_dict = {}
@@ -204,7 +202,7 @@ class OCRProcessor:
     @staticmethod
     def _format_structured_response(file_path: str, content: Dict) -> str:
         languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
-        valid_langs = [l for l in content.get("languages", [DEFAULT_LANGUAGE]) if l in languages.values()]
+        valid_langs = [l for l in (content.get("languages") or [DEFAULT_LANGUAGE]) if l in languages.values()]
         
         response = {
             "file_name": Path(file_path).name,
