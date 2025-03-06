@@ -15,6 +15,7 @@ import requests
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import time
+import fitz  # PyMuPDF
 
 # Constants
 DEFAULT_LANGUAGE = "English"
@@ -68,46 +69,64 @@ class OCRProcessor:
 
     @staticmethod
     def _encode_image(image_path: str) -> Optional[str]:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
+        try:
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Error encoding image {image_path}: {str(e)}")
+            return None
 
     @staticmethod
     def _save_uploaded_file(file_input: Union[str, bytes], filename: str) -> str:
-        file_path = os.path.join(UPLOAD_FOLDER, f"{int(time.time())}_{filename}")
-        if isinstance(file_input, str) and file_input.startswith("http"):
-            response = requests.get(file_input, timeout=10)
-            response.raise_for_status()
-            with open(file_path, 'wb') as f:
-                f.write(response.content)
-        else:
-            with open(file_path, 'wb') as f:
-                if hasattr(file_input, 'read'):
-                    shutil.copyfileobj(file_input, f)
-                else:
-                    f.write(file_input)
-        return file_path
+        clean_filename = os.path.basename(filename).replace(os.sep, "_")
+        file_path = os.path.join(UPLOAD_FOLDER, f"{int(time.time())}_{clean_filename}")
+        
+        try:
+            if isinstance(file_input, str) and file_input.startswith("http"):
+                response = requests.get(file_input, timeout=10)
+                response.raise_for_status()
+                with open(file_path, 'wb') as f:
+                    f.write(response.content)
+            elif isinstance(file_input, str) and os.path.exists(file_input):
+                shutil.copy2(file_input, file_path)
+            else:
+                with open(file_path, 'wb') as f:
+                    if hasattr(file_input, 'read'):
+                        shutil.copyfileobj(file_input, f)
+                    else:
+                        f.write(file_input)
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Failed to save file at {file_path}")
+            return file_path
+        except Exception as e:
+            logger.error(f"Error saving file {filename}: {str(e)}")
+            raise
 
     @staticmethod
     def _pdf_to_images(pdf_path: str) -> List[str]:
-        pdf_document = fitz.open(pdf_path)
-        if pdf_document.page_count > MAX_PDF_PAGES:
+        try:
+            pdf_document = fitz.open(pdf_path)
+            if pdf_document.page_count > MAX_PDF_PAGES:
+                pdf_document.close()
+                raise ValueError(f"PDF exceeds maximum page limit of {MAX_PDF_PAGES}")
+            
+            with ThreadPoolExecutor() as executor:
+                image_paths = list(executor.map(
+                    lambda i: OCRProcessor._convert_page(pdf_path, i),
+                    range(pdf_document.page_count)
+                ))
             pdf_document.close()
-            raise ValueError(f"PDF exceeds maximum page limit of {MAX_PDF_PAGES}")
-        
-        with ThreadPoolExecutor() as executor:
-            image_paths = list(executor.map(
-                lambda i: OCRProcessor._convert_page(pdf_path, i),
-                range(pdf_document.page_count)
-            ))
-        pdf_document.close()
-        return [path for path in image_paths if path]
+            return [path for path in image_paths if path]
+        except Exception as e:
+            logger.error(f"Error converting PDF to images: {str(e)}")
+            return []
 
     @staticmethod
     def _convert_page(pdf_path: str, page_num: int) -> Optional[str]:
         try:
             pdf_document = fitz.open(pdf_path)
             page = pdf_document[page_num]
-            pix = page.get_pixmap(dpi=150)  # Improved resolution
+            pix = page.get_pixmap(dpi=150)
             image_path = os.path.join(UPLOAD_FOLDER, f"page_{page_num + 1}_{int(time.time())}.png")
             pix.save(image_path)
             pdf_document.close()
@@ -134,12 +153,18 @@ class OCRProcessor:
         try:
             self._check_file_size(pdf_file)
             pdf_path = self._save_uploaded_file(pdf_file, file_name)
+            logger.info(f"Saved PDF to: {pdf_path}")
+            
+            if not os.path.exists(pdf_path):
+                raise FileNotFoundError(f"Saved PDF not found at: {pdf_path}")
+            
             image_paths = self._pdf_to_images(pdf_path)
             
-            uploaded_file = self.client.files.upload(
-                file={"file_name": pdf_path, "content": open(pdf_path, "rb")},
-                purpose="ocr"
-            )
+            with open(pdf_path, "rb") as f:
+                uploaded_file = self.client.files.upload(
+                    file={"file_name": file_name, "content": f},
+                    purpose="ocr"
+                )
             signed_url = self.client.files.get_signed_url(file_id=uploaded_file.id, expiry=TEMP_FILE_EXPIRY)
             response = self._call_ocr_api(DocumentURLChunk(document_url=signed_url.url))
             return self._get_combined_markdown(response), image_paths
@@ -153,6 +178,8 @@ class OCRProcessor:
             self._check_file_size(image_file)
             image_path = self._save_uploaded_file(image_file, file_name)
             encoded_image = self._encode_image(image_path)
+            if not encoded_image:
+                raise ValueError("Failed to encode image")
             base64_url = f"data:image/jpeg;base64,{encoded_image}"
             response = self._call_ocr_api(ImageURLChunk(image_url=base64_url))
             return self._get_combined_markdown(response), image_path
@@ -180,6 +207,8 @@ class OCRProcessor:
             self._check_file_size(image_file)
             image_path = self._save_uploaded_file(image_file, file_name)
             encoded_image = self._encode_image(image_path)
+            if not encoded_image:
+                raise ValueError("Failed to encode image")
             base64_url = f"data:image/jpeg;base64,{encoded_image}"
             
             ocr_response = self._call_ocr_api(ImageURLChunk(image_url=base64_url))
