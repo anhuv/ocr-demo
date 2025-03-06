@@ -15,7 +15,6 @@ import requests
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import time
-import fitz  # PyMuPDF
 
 # Constants
 DEFAULT_LANGUAGE = "English"
