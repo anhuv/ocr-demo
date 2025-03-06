@@ -1,7 +1,7 @@
 import os
 import base64
 import gradio as gr
-from mistralai import Mistral
+from mistralai import Mistral, DocumentURLChunk, ImageURLChunk, TextChunk
 from mistralai.models import OCRResponse
 from pathlib import Path
 import pycountry
@@ -30,7 +30,9 @@ class OCRProcessor:
         self.api_key = api_key
         self.client = Mistral(api_key=self.api_key)
         try:
-            self.client.models.list()  # Validate API key
+            models = self.client.models.list()  # Validate API key
+            if not models:
+                raise ValueError("No models available")
         except Exception as e:
             raise ValueError(f"Invalid API key: {str(e)}")
 
@@ -41,20 +43,24 @@ class OCRProcessor:
 
     @staticmethod
     @contextmanager
-    def _temp_file(content: bytes, suffix: str) -> str:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    def _temp_file(content: bytes, suffix: str, keep_alive: bool = False) -> str:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=tempfile.gettempdir())
         try:
+            logger.info(f"Creating temp file: {temp_file.name}")
             temp_file.write(content)
             temp_file.close()
             yield temp_file.name
         finally:
-            if os.path.exists(temp_file.name):
+            if not keep_alive and os.path.exists(temp_file.name):
+                logger.info(f"Cleaning up temp file: {temp_file.name}")
                 os.unlink(temp_file.name)
+            else:
+                logger.info(f"Keeping temp file alive: {temp_file.name}")
 
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-    def _call_ocr_api(self, document: Dict) -> OCRResponse:
+    def _call_ocr_api(self, document: Union[DocumentURLChunk, ImageURLChunk]) -> OCRResponse:
         try:
-            return self.client.ocr.process(model="mistral-ocr-latest", document=document)
+            return self.client.ocr.process(model="mistral-ocr-latest", document=document, include_image_base64=True)
         except Exception as e:
             logger.error(f"OCR API call failed: {str(e)}")
             raise
@@ -70,12 +76,10 @@ class OCRProcessor:
     def _get_file_content(self, file_input: Union[str, bytes]) -> bytes:
         if isinstance(file_input, str):
             if file_input.startswith("http"):
-                # Handle URLs
                 response = requests.get(file_input)
                 response.raise_for_status()
                 return response.content
             else:
-                # Handle local file paths
                 with open(file_input, "rb") as f:
                     return f.read()
         return file_input.read() if hasattr(file_input, 'read') else file_input
@@ -83,81 +87,81 @@ class OCRProcessor:
     def ocr_pdf_url(self, pdf_url: str) -> str:
         logger.info(f"Processing PDF URL: {pdf_url}")
         try:
-            response = self._call_ocr_api({"type": "document_url", "document_url": pdf_url})
-            return self._extract_markdown(response)
+            response = self._call_ocr_api(DocumentURLChunk(document_url=pdf_url))
+            return self._get_combined_markdown(response)
         except Exception as e:
             return self._handle_error("PDF URL processing", e)
 
-    def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> str:
+    def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> tuple[str, str]:
         file_name = getattr(pdf_file, 'name', 'unknown')
         logger.info(f"Processing uploaded PDF: {file_name}")
         try:
             content = self._get_file_content(pdf_file)
-            with self._temp_file(content, ".pdf") as temp_path:
+            with self._temp_file(content, ".pdf", keep_alive=True) as temp_path:
                 uploaded_file = self.client.files.upload(
                     file={"file_name": temp_path, "content": open(temp_path, "rb")},
                     purpose="ocr"
                 )
                 signed_url = self.client.files.get_signed_url(file_id=uploaded_file.id, expiry=TEMP_FILE_EXPIRY)
-                response = self._call_ocr_api({"type": "document_url", "document_url": signed_url.url})
-                return self._extract_markdown(response)
+                response = self._call_ocr_api(DocumentURLChunk(document_url=signed_url.url))
+                return self._get_combined_markdown(response), temp_path
         except Exception as e:
-            return self._handle_error("uploaded PDF processing", e)
+            return self._handle_error("uploaded PDF processing", e), None
 
     def ocr_image_url(self, image_url: str) -> str:
         logger.info(f"Processing image URL: {image_url}")
         try:
-            response = self._call_ocr_api({"type": "image_url", "image_url": image_url})
-            return self._extract_markdown(response)
+            response = self._call_ocr_api(ImageURLChunk(image_url=image_url))
+            return self._get_combined_markdown(response)
         except Exception as e:
             return self._handle_error("image URL processing", e)
 
-    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> str:
+    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> tuple[str, str]:
         file_name = getattr(image_file, 'name', 'unknown')
         logger.info(f"Processing uploaded image: {file_name}")
         try:
             content = self._get_file_content(image_file)
-            with self._temp_file(content, ".jpg") as temp_path:
+            with self._temp_file(content, ".jpg", keep_alive=True) as temp_path:
                 encoded_image = self._encode_image(temp_path)
                 base64_url = f"data:image/jpeg;base64,{encoded_image}"
-                response = self._call_ocr_api({"type": "image_url", "image_url": base64_url})
-                return self._extract_markdown(response)
+                response = self._call_ocr_api(ImageURLChunk(image_url=base64_url))
+                return self._get_combined_markdown(response), temp_path
         except Exception as e:
-            return self._handle_error("uploaded image processing", e)
+            return self._handle_error("uploaded image processing", e), None
 
     def document_understanding(self, doc_url: str, question: str) -> str:
         logger.info(f"Document understanding - URL: {doc_url}, Question: {question}")
         try:
             messages = [{"role": "user", "content": [
-                {"type": "text", "text": question},
-                {"type": "document_url", "document_url": doc_url}
+                TextChunk(text=question),
+                DocumentURLChunk(document_url=doc_url)
             ]}]
             response = self._call_chat_complete(model="mistral-small-latest", messages=messages)
             return response.choices[0].message.content if response.choices else "No response received"
         except Exception as e:
             return self._handle_error("document understanding", e)
 
-    def structured_ocr(self, image_file: Union[str, bytes]) -> str:
+    def structured_ocr(self, image_file: Union[str, bytes]) -> tuple[str, str]:
         file_name = getattr(image_file, 'name', 'unknown')
         logger.info(f"Processing structured OCR for: {file_name}")
         try:
             content = self._get_file_content(image_file)
-            with self._temp_file(content, ".jpg") as temp_path:
+            with self._temp_file(content, ".jpg", keep_alive=True) as temp_path:
                 encoded_image = self._encode_image(temp_path)
                 base64_url = f"data:image/jpeg;base64,{encoded_image}"
-                ocr_response = self._call_ocr_api({"type": "image_url", "image_url": base64_url})
-                markdown = self._extract_markdown(ocr_response)
+                ocr_response = self._call_ocr_api(ImageURLChunk(image_url=base64_url))
+                markdown = self._get_combined_markdown(ocr_response)
 
                 chat_response = self._call_chat_complete(
                     model="pixtral-12b-latest",
                     messages=[{
                         "role": "user",
                         "content": [
-                            {"type": "image_url", "image_url": base64_url},
-                            {"type": "text", "text": (
-                                f"OCR result:\n<BEGIN_IMAGE_OCR>\n{markdown}\n<END_IMAGE_OCR>\n"
-                                "Convert to structured JSON with file_name, topics, languages, and ocr_contents"
-                            )}
+                            ImageURLChunk(image_url=base64_url),
+                            TextChunk(text=(
+                                f"This is image's OCR in markdown:\n<BEGIN_IMAGE_OCR>\n{markdown}\n<END_IMAGE_OCR>.\n"
+                                "Convert this into a sensible structured json response with file_name, topics, languages, and ocr_contents fields"
+                            ))
                         ]
                     }],
                     response_format={"type": "json_object"},
@@ -166,13 +170,21 @@ class OCRProcessor:
 
                 response_content = chat_response.choices[0].message.content
                 content = json.loads(response_content)
-                return self._format_structured_response(temp_path, content)
+                return self._format_structured_response(temp_path, content), temp_path
         except Exception as e:
-            return self._handle_error("structured OCR", e)
+            return self._handle_error("structured OCR", e), None
 
-    @staticmethod
-    def _extract_markdown(response: OCRResponse) -> str:
-        return response.pages[0].markdown if response.pages else "No text extracted"
+    def _get_combined_markdown(self, response: OCRResponse) -> str:
+        markdowns = []
+        for page in response.pages:
+            image_data = {}
+            for img in page.images:
+                image_data[img.id] = img.image_base64
+            markdown = page.markdown
+            for img_name, base64_str in image_data.items():
+                markdown = markdown.replace(f"![{img_name}]({img_name})", f"![{img_name}]({base64_str})")
+            markdowns.append(markdown)
+        return "\n\n".join(markdowns)
 
     @staticmethod
     def _handle_error(context: str, error: Exception) -> str:
@@ -182,13 +194,14 @@ class OCRProcessor:
     @staticmethod
     def _format_structured_response(file_path: str, content: Dict) -> str:
         languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
-        valid_langs = [l for l in content.get("languages", [DEFAULT_LANGUAGE]) if l in languages.values()]
+        content_languages = content["languages"] if "languages" in content else [DEFAULT_LANGUAGE]
+        valid_langs = [l for l in content_languages if l in languages.values()]
 
         response = {
             "file_name": Path(file_path).name,
-            "topics": content.get("topics", []),
+            "topics": content["topics"] if "topics" in content else [],
             "languages": valid_langs or [DEFAULT_LANGUAGE],
-            "ocr_contents": content.get("ocr_contents", {})
+            "ocr_contents": content["ocr_contents"] if "ocr_contents" in content else {}
         }
         return f"```json\n{json.dumps(response, indent=4)}\n```"
 
@@ -224,32 +237,36 @@ def create_interface():
         )
 
         tabs = [
-            ("OCR with PDF URL", gr.Textbox, "ocr_pdf_url", "PDF URL", None),
-            ("OCR with Uploaded PDF", gr.File, "ocr_uploaded_pdf", "Upload PDF", SUPPORTED_PDF_TYPES),
-            ("OCR with Image URL", gr.Textbox, "ocr_image_url", "Image URL", None),
-            ("OCR with Uploaded Image", gr.File, "ocr_uploaded_image", "Upload Image", SUPPORTED_IMAGE_TYPES),
-            ("Structured OCR", gr.File, "structured_ocr", "Upload Image", SUPPORTED_IMAGE_TYPES),
+            ("OCR with PDF URL", gr.Textbox, "ocr_pdf_url", "PDF URL", None, None),
+            ("OCR with Uploaded PDF", gr.File, "ocr_uploaded_pdf", "Upload PDF", SUPPORTED_PDF_TYPES, gr.File),
+            ("OCR with Image URL", gr.Textbox, "ocr_image_url", "Image URL", None, None),
+            ("OCR with Uploaded Image", gr.File, "ocr_uploaded_image", "Upload Image", SUPPORTED_IMAGE_TYPES, gr.Image),
+            ("Structured OCR", gr.File, "structured_ocr", "Upload Image", SUPPORTED_IMAGE_TYPES, gr.Image),
         ]
 
-        for name, input_type, fn_name, label, file_types in tabs:
+        for name, input_type, fn_name, label, file_types, preview_type in tabs:
             with gr.Tab(name):
                 if input_type == gr.Textbox:
                     inputs = input_type(label=label, placeholder=f"e.g., https://example.com/{label.lower().replace(' ', '')}")
                 else:
                     inputs = input_type(label=label, file_types=file_types)
-                output = gr.Markdown(label="Result")
+                
+                with gr.Row():
+                    output = gr.Markdown(label="Result")
+                    preview = preview_type(label="Preview") if preview_type else None
+                
                 button_label = name.replace("OCR with ", "").replace("Structured ", "Get Structured ")
 
                 def process_with_api(processor, input_data):
                     if not processor:
-                        return "**Error:** Please set a valid API key first."
+                        return "**Error:** Please set a valid API key first.", None
                     fn = getattr(processor, fn_name)
-                    return fn(input_data)
+                    return fn(input_data)  # Returns tuple (result, preview_path)
 
                 gr.Button(f"Process {button_label}").click(
                     fn=process_with_api,
                     inputs=[processor_state, inputs],
-                    outputs=output
+                    outputs=[output, preview] if preview else [output]
                 )
 
         with gr.Tab("Document Understanding"):
