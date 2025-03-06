@@ -355,3 +355,8 @@ def create_interface():
             )
 
     return demo
+
+
+if __name__ == "__main__":
+    print(f"===== Application Startup at {os.environ.get('START_TIME', 'Unknown')} =====")
+    create_interface().launch(share=True, debug=True)
