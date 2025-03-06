@@ -194,7 +194,9 @@ def create_interface():
                 else:  # gr.File
                     inputs = input_type(label=label, file_types=file_types)
                 output = gr.Markdown(label="Result")
-                gr.Button(f"Process {name.split(' with ')[1]}").click(fn, inputs=inputs, outputs=output)
+                # Use a more reliable way to get the button label
+                button_label = name.replace("OCR with ", "").replace("Structured ", "Get Structured ")
+                gr.Button(f"Process {button_label}").click(fn, inputs=inputs, outputs=output)
 
         with gr.Tab("Document Understanding"):
             doc_url = gr.Textbox(label="Document URL", placeholder="e.g., https://arxiv.org/pdf/1805.04770")
