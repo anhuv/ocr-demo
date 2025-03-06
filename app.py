@@ -40,6 +40,14 @@ def call_ocr_api(document):
 def call_chat_complete(model, messages, **kwargs):
     return client.chat.complete(model=model, messages=messages, **kwargs)
 
+# Helper function to get file content (handles both string paths and file-like objects)
+def get_file_content(file_input):
+    if isinstance(file_input, str):  # Gradio 3.x: file path
+        with open(file_input, "rb") as f:
+            return f.read()
+    else:  # Gradio 4.x or file-like object
+        return file_input.read()
+
 # OCR with PDF URL
 def ocr_pdf_url(pdf_url):
     logger.info(f"Processing PDF URL: {pdf_url}")
@@ -57,18 +65,20 @@ def ocr_pdf_url(pdf_url):
 
 # OCR with Uploaded PDF
 def ocr_uploaded_pdf(pdf_file):
-    logger.info(f"Processing uploaded PDF: {pdf_file.name}")
+    logger.info(f"Processing uploaded PDF: {getattr(pdf_file, 'name', 'unknown')}")
     temp_path = None
     try:
+        # Get file content (handles both string and file-like objects)
+        content = get_file_content(pdf_file)
         # Use tempfile to handle uploaded file securely
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(pdf_file.read())
+            temp_file.write(content)
             temp_path = temp_file.name
         uploaded_pdf = client.files.upload(
             file={"file_name": temp_path, "content": open(temp_path, "rb")},
             purpose="ocr"
         )
-        signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id, expiry=7200)  # Increased to 2 hours
+        signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id, expiry=7200)  # 2 hours
         ocr_response = call_ocr_api({"type": "document_url", "document_url": signed_url.url})
         try:
             markdown = ocr_response.pages[0].markdown
@@ -100,11 +110,13 @@ def ocr_image_url(image_url):
 
 # OCR with Uploaded Image
 def ocr_uploaded_image(image_file):
-    logger.info(f"Processing uploaded image: {image_file.name}")
+    logger.info(f"Processing uploaded image: {getattr(image_file, 'name', 'unknown')}")
     temp_path = None
     try:
+        # Get file content (handles both string and file-like objects)
+        content = get_file_content(image_file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_file.write(image_file.read())
+            temp_file.write(content)
             temp_path = temp_file.name
         encoded_image = encode_image(temp_path)
         if "Error" in encoded_image:
@@ -164,11 +176,13 @@ class StructuredOCR(BaseModel):
     ocr_contents: dict
 
 def structured_ocr(image_file):
-    logger.info(f"Processing structured OCR for image: {image_file.name}")
+    logger.info(f"Processing structured OCR for image: {getattr(image_file, 'name', 'unknown')}")
     temp_path = None
     try:
+        # Get file content (handles both string and file-like objects)
+        content = get_file_content(image_file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_file.write(image_file.read())
+            temp_file.write(content)
             temp_path = temp_file.name
         image_path = Path(temp_path)
         encoded_image = encode_image(temp_path)
