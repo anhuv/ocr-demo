@@ -1,3 +1,4 @@
 gradio
 mistralai
 pycountry
+tenacity
