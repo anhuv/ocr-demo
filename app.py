@@ -13,7 +13,6 @@ import tempfile
 from typing import Union, Dict, List
 from contextlib import contextmanager
 import requests
-from enum import Enum
 
 # Constants
 DEFAULT_LANGUAGE = "English"
@@ -38,12 +37,8 @@ class OCRProcessor:
 
     @staticmethod
     def _encode_image(image_path: str) -> str:
-        try:
-            with open(image_path, "rb") as image_file:
-                return base64.b64encode(image_file.read()).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Error encoding image {image_path}: {str(e)}")
-            raise
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
 
     @staticmethod
     @contextmanager
@@ -73,23 +68,18 @@ class OCRProcessor:
             logger.error(f"Chat complete API call failed: {str(e)}")
             raise
 
-    def _get_file_content(self, file_input: Union[str, object]) -> bytes:
-        try:
-            if isinstance(file_input, str) and file_input.startswith(("http://", "https://")):
+    def _get_file_content(self, file_input: Union[str, bytes]) -> bytes:
+        if isinstance(file_input, str):
+            if file_input.startswith("http"):
                 # Handle URLs
-                response = requests.get(file_input, timeout=10)
+                response = requests.get(file_input)
                 response.raise_for_status()
                 return response.content
-            elif isinstance(file_input, str):  # File path
+            else:
+                # Handle local file paths
                 with open(file_input, "rb") as f:
                     return f.read()
-            elif hasattr(file_input, 'read'):  # File-like object
-                return file_input.read()
-            else:
-                raise ValueError("Invalid file input: must be a URL, path, or file-like object")
-        except Exception as e:
-            logger.error(f"Error getting file content: {str(e)}")
-            raise
+        return file_input.read() if hasattr(file_input, 'read') else file_input
 
     def ocr_pdf_url(self, pdf_url: str) -> str:
         logger.info(f"Processing PDF URL: {pdf_url}")
@@ -99,7 +89,7 @@ class OCRProcessor:
         except Exception as e:
             return self._handle_error("PDF URL processing", e)
 
-    def ocr_uploaded_pdf(self, pdf_file: Union[str, object]) -> str:
+    def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> str:
         file_name = getattr(pdf_file, 'name', 'unknown')
         logger.info(f"Processing uploaded PDF: {file_name}")
         try:
@@ -123,7 +113,7 @@ class OCRProcessor:
         except Exception as e:
             return self._handle_error("image URL processing", e)
 
-    def ocr_uploaded_image(self, image_file: Union[str, object]) -> str:
+    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> str:
         file_name = getattr(image_file, 'name', 'unknown')
         logger.info(f"Processing uploaded image: {file_name}")
         try:
@@ -148,7 +138,7 @@ class OCRProcessor:
         except Exception as e:
             return self._handle_error("document understanding", e)
 
-    def structured_ocr(self, image_file: Union[str, object]) -> str:
+    def structured_ocr(self, image_file: Union[str, bytes]) -> str:
         file_name = getattr(image_file, 'name', 'unknown')
         logger.info(f"Processing structured OCR for: {file_name}")
         try:
@@ -175,24 +165,19 @@ class OCRProcessor:
                     temperature=0
                 )
 
-                content = chat_response.choices[0].message.content if chat_response.choices else "{}"
-                try:
-                    response_dict = json.loads(content)
-                    if isinstance(response_dict, list):  # Handle unexpected list response
-                        response_dict = response_dict[0] if response_dict else {}
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON response from chat API")
-                    response_dict = {}
-                return self._format_structured_response(temp_path, response_dict)
+                # Ensure the response is a dictionary
+                response_content = chat_response.choices[0].message.content
+                if isinstance(response_content, list):
+                    response_content = response_content[0] if response_content else "{}"
+
+                content = json.loads(response_content)
+                return self._format_structured_response(temp_path, content)
         except Exception as e:
             return self._handle_error("structured OCR", e)
 
     @staticmethod
     def _extract_markdown(response: OCRResponse) -> str:
-        try:
-            return response.pages[0].markdown if response.pages else "No text extracted"
-        except AttributeError:
-            return "Invalid OCR response format"
+        return response.pages[0].markdown if response.pages else "No text extracted"
 
     @staticmethod
     def _handle_error(context: str, error: Exception) -> str:
@@ -202,8 +187,8 @@ class OCRProcessor:
     @staticmethod
     def _format_structured_response(file_path: str, content: Dict) -> str:
         languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
-        valid_langs = [l for l in (content.get("languages") or [DEFAULT_LANGUAGE]) if l in languages.values()]
-        
+        valid_langs = [l for l in content.get("languages", [DEFAULT_LANGUAGE]) if l in languages.values()]
+
         response = {
             "file_name": Path(file_path).name,
             "topics": content.get("topics", []),
@@ -232,7 +217,7 @@ def create_interface():
             except Exception as e:
                 return None, f"**Error:** Unexpected error: {str(e)}"
 
-        processor_state = gr.State(value=None)
+        processor_state = gr.State()
         api_status = gr.Markdown("API key not set. Please enter and set your key.")
 
         set_api_button = gr.Button("Set API Key")
