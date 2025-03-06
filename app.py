@@ -146,4 +146,5 @@ with gr.Blocks(title="Mistral OCR & Document Understanding App") as demo:
 # Launch the app
 demo.launch(
     share=True,
+    debug=True
 )
