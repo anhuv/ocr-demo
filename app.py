@@ -21,7 +21,7 @@ DEFAULT_LANGUAGE = "English"
 SUPPORTED_IMAGE_TYPES = [".jpg", ".png", ".jpeg"]
 SUPPORTED_PDF_TYPES = [".pdf"]
 TEMP_FILE_EXPIRY = 7200  # 2 hours in seconds
-UPLOAD_FOLDER = "uploads"
+UPLOAD_FOLDER = "./uploads"
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_PDF_PAGES = 50
 
