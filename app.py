@@ -12,6 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 import tempfile
 from typing import Union, Dict, List
 from contextlib import contextmanager
+import requests
 
 # Constants
 DEFAULT_LANGUAGE = "English"
@@ -69,8 +70,15 @@ class OCRProcessor:
 
     def _get_file_content(self, file_input: Union[str, bytes]) -> bytes:
         if isinstance(file_input, str):
-            with open(file_input, "rb") as f:
-                return f.read()
+            if file_input.startswith("http"):
+                # Handle URLs
+                response = requests.get(file_input)
+                response.raise_for_status()
+                return response.content
+            else:
+                # Handle local file paths
+                with open(file_input, "rb") as f:
+                    return f.read()
         return file_input.read() if hasattr(file_input, 'read') else file_input
 
     def ocr_pdf_url(self, pdf_url: str) -> str:
@@ -140,7 +148,7 @@ class OCRProcessor:
                 base64_url = f"data:image/jpeg;base64,{encoded_image}"
                 ocr_response = self._call_ocr_api({"type": "image_url", "image_url": base64_url})
                 markdown = self._extract_markdown(ocr_response)
-    
+
                 chat_response = self._call_chat_complete(
                     model="pixtral-12b-latest",
                     messages=[{
@@ -156,12 +164,12 @@ class OCRProcessor:
                     response_format={"type": "json_object"},
                     temperature=0
                 )
-    
+
                 # Ensure the response is a dictionary
                 response_content = chat_response.choices[0].message.content
                 if isinstance(response_content, list):
                     response_content = response_content[0] if response_content else "{}"
-    
+
                 content = json.loads(response_content)
                 return self._format_structured_response(temp_path, content)
         except Exception as e:
