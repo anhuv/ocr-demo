@@ -180,22 +180,25 @@ def create_interface():
         gr.Markdown("Extract text from PDFs and images or get structured JSON output")
 
         tabs = [
-            ("OCR with PDF URL", gr.Textbox, processor.ocr_pdf_url, "PDF URL"),
+            ("OCR with PDF URL", gr.Textbox, processor.ocr_pdf_url, "PDF URL", None),
             ("OCR with Uploaded PDF", gr.File, processor.ocr_uploaded_pdf, "Upload PDF", SUPPORTED_PDF_TYPES),
-            ("OCR with Image URL", gr.Textbox, processor.ocr_image_url, "Image URL"),
+            ("OCR with Image URL", gr.Textbox, processor.ocr_image_url, "Image URL", None),
             ("OCR with Uploaded Image", gr.File, processor.ocr_uploaded_image, "Upload Image", SUPPORTED_IMAGE_TYPES),
             ("Structured OCR", gr.File, processor.structured_ocr, "Upload Image", SUPPORTED_IMAGE_TYPES),
         ]
 
-        for name, input_type, fn, label, *file_types in tabs:
+        for name, input_type, fn, label, file_types in tabs:
             with gr.Tab(name):
-                inputs = input_type(label=label, file_types=file_types or None)
+                if input_type == gr.Textbox:
+                    inputs = input_type(label=label, placeholder=f"e.g., https://example.com/{label.lower().replace(' ', '')}")
+                else:  # gr.File
+                    inputs = input_type(label=label, file_types=file_types)
                 output = gr.Markdown(label="Result")
                 gr.Button(f"Process {name.split(' with ')[1]}").click(fn, inputs=inputs, outputs=output)
 
         with gr.Tab("Document Understanding"):
-            doc_url = gr.Textbox(label="Document URL")
-            question = gr.Textbox(label="Question")
+            doc_url = gr.Textbox(label="Document URL", placeholder="e.g., https://arxiv.org/pdf/1805.04770")
+            question = gr.Textbox(label="Question", placeholder="e.g., What is the last sentence?")
             output = gr.Markdown(label="Answer")
             gr.Button("Ask Question").click(processor.document_understanding, inputs=[doc_url, question], outputs=output)
 
