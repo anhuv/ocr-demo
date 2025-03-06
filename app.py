@@ -209,45 +209,44 @@ def structured_ocr(image_file: Union[str, bytes]) -> str:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
-# Gradio Interface
 with gr.Blocks(title="Mistral OCR & Structured Output App") as demo:
     gr.Markdown("# Mistral OCR & Structured Output App")
     gr.Markdown("Extract text from PDFs and images, ask questions about documents, or get structured JSON output!")
 
     with gr.Tab("OCR with PDF URL"):
         pdf_url_input = gr.Textbox(label="PDF URL", placeholder="e.g., https://arxiv.org/pdf/2201.04234")
-        pdf_url_output = gr.Textbox(label="OCR Result (Markdown)")
+        pdf_url_output = gr.Markdown(label="OCR Result")
         pdf_url_button = gr.Button("Process PDF")
         pdf_url_button.click(ocr_pdf_url, inputs=pdf_url_input, outputs=pdf_url_output)
 
     with gr.Tab("OCR with Uploaded PDF"):
         pdf_file_input = gr.File(label="Upload PDF", file_types=[".pdf"])
-        pdf_file_output = gr.Textbox(label="OCR Result (Markdown)")
+        pdf_file_output = gr.Markdown(label="OCR Result")
         pdf_file_button = gr.Button("Process Uploaded PDF")
         pdf_file_button.click(ocr_uploaded_pdf, inputs=pdf_file_input, outputs=pdf_file_output)
 
     with gr.Tab("OCR with Image URL"):
         image_url_input = gr.Textbox(label="Image URL", placeholder="e.g., https://example.com/image.jpg")
-        image_url_output = gr.Textbox(label="OCR Result (Markdown)")
+        image_url_output = gr.Markdown(label="OCR Result")
         image_url_button = gr.Button("Process Image")
         image_url_button.click(ocr_image_url, inputs=image_url_input, outputs=image_url_output)
 
     with gr.Tab("OCR with Uploaded Image"):
         image_file_input = gr.File(label="Upload Image", file_types=[".jpg", ".png"])
-        image_file_output = gr.Textbox(label="OCR Result (Markdown)")
+        image_file_output = gr.Markdown(label="OCR Result")
         image_file_button = gr.Button("Process Uploaded Image")
         image_file_button.click(ocr_uploaded_image, inputs=image_file_input, outputs=image_file_output)
 
     with gr.Tab("Document Understanding"):
         doc_url_input = gr.Textbox(label="Document URL", placeholder="e.g., https://arxiv.org/pdf/1805.04770")
         question_input = gr.Textbox(label="Question", placeholder="e.g., What is the last sentence?")
-        doc_output = gr.Textbox(label="Answer")
+        doc_output = gr.Markdown(label="Answer")
         doc_button = gr.Button("Ask Question")
         doc_button.click(document_understanding, inputs=[doc_url_input, question_input], outputs=doc_output)
 
     with gr.Tab("Structured OCR"):
         struct_image_input = gr.File(label="Upload Image", file_types=[".jpg", ".png"])
-        struct_output = gr.Textbox(label="Structured JSON Output")
+        struct_output = gr.Markdown(label="Structured JSON Output")
         struct_button = gr.Button("Get Structured Output")
         struct_button.click(structured_ocr, inputs=struct_image_input, outputs=struct_output)
 
