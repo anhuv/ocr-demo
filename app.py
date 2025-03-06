@@ -11,6 +11,8 @@ import pymupdf as fitz
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 from concurrent.futures import ThreadPoolExecutor
+import socket
+from requests.exceptions import ConnectionError, Timeout
 
 # Constants
 SUPPORTED_IMAGE_TYPES = [".jpg", ".png", ".jpeg"]
@@ -62,13 +64,16 @@ class OCRProcessor:
         
         try:
             if isinstance(file_input, str) and file_input.startswith("http"):
-                response = requests.get(file_input, timeout=10)
+                logger.info(f"Downloading from URL: {file_input}")
+                response = requests.get(file_input, timeout=30)
                 response.raise_for_status()
                 with open(file_path, 'wb') as f:
                     f.write(response.content)
             elif isinstance(file_input, str) and os.path.exists(file_input):
+                logger.info(f"Copying local file: {file_input}")
                 shutil.copy2(file_input, file_path)
             else:
+                logger.info(f"Saving file object: {filename}")
                 with open(file_path, 'wb') as f:
                     if hasattr(file_input, 'read'):
                         shutil.copyfileobj(file_input, f)
@@ -76,6 +81,7 @@ class OCRProcessor:
                         f.write(file_input)
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"Failed to save file at {file_path}")
+            logger.info(f"File saved to: {file_path}")
             return file_path
         except Exception as e:
             logger.error(f"Error saving file {filename}: {str(e)}")
@@ -127,11 +133,18 @@ class OCRProcessor:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call_ocr_api(self, encoded_image: str) -> OCRResponse:
         base64_url = f"data:image/png;base64,{encoded_image}"
-        return self.client.ocr.process(
-            model="mistral-ocr-latest",
-            document=ImageURLChunk(image_url=base64_url),
-            include_image_base64=True
-        )
+        try:
+            logger.info("Calling OCR API")
+            response = self.client.ocr.process(
+                model="mistral-ocr-latest",
+                document=ImageURLChunk(image_url=base64_url),
+                include_image_base64=True
+            )
+            logger.info("OCR API call successful")
+            return response
+        except (ConnectionError, Timeout, socket.error) as e:
+            logger.error(f"Network error during OCR API call: {str(e)}")
+            raise
 
     def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> Tuple[str, List[str]]:
         file_name = getattr(pdf_file, 'name', f"pdf_{int(time.time())}.pdf")
@@ -139,7 +152,6 @@ class OCRProcessor:
         try:
             self._check_file_size(pdf_file)
             pdf_path = self._save_uploaded_file(pdf_file, file_name)
-            logger.info(f"Saved PDF to: {pdf_path}")
             
             if not os.path.exists(pdf_path):
                 raise FileNotFoundError(f"Saved PDF not found at: {pdf_path}")
@@ -148,14 +160,13 @@ class OCRProcessor:
             if not image_data:
                 raise ValueError("No pages converted from PDF")
             
-            # Process each page with OCR
             ocr_results = []
-            for _, encoded in image_data:
-                response = self._call_ocr_api(encoded)
-                markdown = self._get_combined_markdown(response)
-                ocr_results.append(markdown)
-            
             image_paths = [path for path, _ in image_data]
+            for i, (_, encoded) in enumerate(image_data):
+                response = self._call_ocr_api(encoded)
+                markdown_with_images = self._get_combined_markdown_with_images(response, image_paths, i)
+                ocr_results.append(markdown_with_images)
+            
             return "\n\n".join(ocr_results), image_paths
         except Exception as e:
             return self._handle_error("uploaded PDF processing", e), []
@@ -174,12 +185,12 @@ class OCRProcessor:
                 raise ValueError("No pages converted from PDF")
             
             ocr_results = []
-            for _, encoded in image_data:
-                response = self._call_ocr_api(encoded)
-                markdown = self._get_combined_markdown(response)
-                ocr_results.append(markdown)
-            
             image_paths = [path for path, _ in image_data]
+            for i, (_, encoded) in enumerate(image_data):
+                response = self._call_ocr_api(encoded)
+                markdown_with_images = self._get_combined_markdown_with_images(response, image_paths, i)
+                ocr_results.append(markdown_with_images)
+            
             return "\n\n".join(ocr_results), image_paths
         except Exception as e:
             return self._handle_error("PDF URL processing", e), []
@@ -192,16 +203,51 @@ class OCRProcessor:
             image_path = self._save_uploaded_file(image_file, file_name)
             encoded_image = self._encode_image(image_path)
             response = self._call_ocr_api(encoded_image)
-            return self._get_combined_markdown(response), image_path
+            return self._get_combined_markdown_with_images(response), image_path
         except Exception as e:
             return self._handle_error("image processing", e), None
 
     @staticmethod
-    def _get_combined_markdown(response: OCRResponse) -> str:
-        return "\n\n".join(
-            page.markdown for page in response.pages
-            if page.markdown.strip()
-        ) or "No text detected"
+    def _get_combined_markdown_with_images(response: OCRResponse, image_paths: List[str] = None, page_index: int = None) -> str:
+        markdown_parts = []
+        for i, page in enumerate(response.pages):
+            if page.markdown.strip():
+                markdown = page.markdown
+                logger.info(f"Page {i} markdown: {markdown}")
+                if hasattr(page, 'images') and page.images:
+                    logger.info(f"Found {len(page.images)} images in page {i}")
+                    for img in page.images:
+                        if img.image_base64:
+                            logger.info(f"Replacing image {img.id} with base64")
+                            markdown = markdown.replace(
+                                f"![{img.id}]({img.id})",
+                                f"![{img.id}](data:image/png;base64,{img.image_base64})"
+                            )
+                        else:
+                            logger.warning(f"No base64 data for image {img.id}")
+                            if image_paths and page_index is not None and page_index < len(image_paths):
+                                local_encoded = OCRProcessor._encode_image(image_paths[page_index])
+                                markdown = markdown.replace(
+                                    f"![{img.id}]({img.id})",
+                                    f"![{img.id}](data:image/png;base64,{local_encoded})"
+                                )
+                else:
+                    logger.warning(f"No images found in page {i}")
+                    # Replace known placeholders or append the local image
+                    if image_paths and page_index is not None and page_index < len(image_paths):
+                        local_encoded = OCRProcessor._encode_image(image_paths[page_index])
+                        # Replace placeholders like img-0.jpeg
+                        placeholder = f"img-{i}.jpeg"
+                        if placeholder in markdown:
+                            markdown = markdown.replace(
+                                placeholder,
+                                f"![Page {i} Image](data:image/png;base64,{local_encoded})"
+                            )
+                        else:
+                            # Append the image if no placeholder is found
+                            markdown += f"\n\n![Page {i} Image](data:image/png;base64,{local_encoded})"
+                markdown_parts.append(markdown)
+        return "\n\n".join(markdown_parts) or "No text or images detected"
 
     @staticmethod
     def _handle_error(context: str, error: Exception) -> str:
@@ -276,11 +322,14 @@ def create_interface():
             def process_pdf(processor, pdf_file, pdf_url):
                 if not processor:
                     return "Please set API key first", []
-                if pdf_file:
+                logger.info(f"Received inputs - PDF file: {pdf_file}, PDF URL: {pdf_url}")
+                if pdf_file is not None and hasattr(pdf_file, 'name'):
+                    logger.info(f"Processing as uploaded PDF: {pdf_file.name}")
                     return processor.ocr_uploaded_pdf(pdf_file)
-                elif pdf_url:
+                elif pdf_url and pdf_url.strip():
+                    logger.info(f"Processing as PDF URL: {pdf_url}")
                     return processor.ocr_pdf_url(pdf_url)
-                return "Please upload a PDF or provide a URL", []
+                return "Please upload a PDF or provide a valid URL", []
 
             process_pdf_btn.click(
                 fn=process_pdf,
