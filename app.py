@@ -11,6 +11,7 @@ import json
 import logging
 from tenacity import retry, stop_after_attempt, wait_fixed
 import tempfile
+from typing import Union
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -23,25 +24,25 @@ if not api_key:
 client = Mistral(api_key=api_key)
 
 # Helper function to encode image to base64
-def encode_image(image_path):
+def encode_image(image_path: str) -> str:
     try:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
     except Exception as e:
         logger.error(f"Error encoding image {image_path}: {str(e)}")
-        return f"Error encoding image: {str(e)}"
+        raise
 
 # Retry-enabled API call helpers
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def call_ocr_api(document):
+def call_ocr_api(document: dict) -> OCRResponse:
     return client.ocr.process(model="mistral-ocr-latest", document=document)
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def call_chat_complete(model, messages, **kwargs):
+def call_chat_complete(model: str, messages: list, **kwargs) -> dict:
     return client.chat.complete(model=model, messages=messages, **kwargs)
 
 # Helper function to get file content (handles both string paths and file-like objects)
-def get_file_content(file_input):
+def get_file_content(file_input: Union[str, bytes]) -> bytes:
     if isinstance(file_input, str):  # Gradio 3.x: file path
         with open(file_input, "rb") as f:
             return f.read()
@@ -49,14 +50,11 @@ def get_file_content(file_input):
         return file_input.read()
 
 # OCR with PDF URL
-def ocr_pdf_url(pdf_url):
+def ocr_pdf_url(pdf_url: str) -> str:
     logger.info(f"Processing PDF URL: {pdf_url}")
     try:
         ocr_response = call_ocr_api({"type": "document_url", "document_url": pdf_url})
-        try:
-            markdown = ocr_response.pages[0].markdown
-        except (IndexError, AttributeError):
-            markdown = "No text extracted or response invalid."
+        markdown = ocr_response.pages[0].markdown if ocr_response.pages else "No text extracted or response invalid."
         logger.info("Successfully processed PDF URL")
         return markdown
     except Exception as e:
@@ -64,13 +62,11 @@ def ocr_pdf_url(pdf_url):
         return f"**Error:** {str(e)}"
 
 # OCR with Uploaded PDF
-def ocr_uploaded_pdf(pdf_file):
+def ocr_uploaded_pdf(pdf_file: Union[str, bytes]) -> str:
     logger.info(f"Processing uploaded PDF: {getattr(pdf_file, 'name', 'unknown')}")
     temp_path = None
     try:
-        # Get file content (handles both string and file-like objects)
         content = get_file_content(pdf_file)
-        # Use tempfile to handle uploaded file securely
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name
@@ -80,10 +76,7 @@ def ocr_uploaded_pdf(pdf_file):
         )
         signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id, expiry=7200)  # 2 hours
         ocr_response = call_ocr_api({"type": "document_url", "document_url": signed_url.url})
-        try:
-            markdown = ocr_response.pages[0].markdown
-        except (IndexError, AttributeError):
-            markdown = "No text extracted or response invalid."
+        markdown = ocr_response.pages[0].markdown if ocr_response.pages else "No text extracted or response invalid."
         logger.info("Successfully processed uploaded PDF")
         return markdown
     except Exception as e:
@@ -94,14 +87,11 @@ def ocr_uploaded_pdf(pdf_file):
             os.remove(temp_path)
 
 # OCR with Image URL
-def ocr_image_url(image_url):
+def ocr_image_url(image_url: str) -> str:
     logger.info(f"Processing image URL: {image_url}")
     try:
         ocr_response = call_ocr_api({"type": "image_url", "image_url": image_url})
-        try:
-            markdown = ocr_response.pages[0].markdown
-        except (IndexError, AttributeError):
-            markdown = "No text extracted or response invalid."
+        markdown = ocr_response.pages[0].markdown if ocr_response.pages else "No text extracted or response invalid."
         logger.info("Successfully processed image URL")
         return markdown
     except Exception as e:
@@ -109,24 +99,18 @@ def ocr_image_url(image_url):
         return f"**Error:** {str(e)}"
 
 # OCR with Uploaded Image
-def ocr_uploaded_image(image_file):
+def ocr_uploaded_image(image_file: Union[str, bytes]) -> str:
     logger.info(f"Processing uploaded image: {getattr(image_file, 'name', 'unknown')}")
     temp_path = None
     try:
-        # Get file content (handles both string and file-like objects)
         content = get_file_content(image_file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name
         encoded_image = encode_image(temp_path)
-        if "Error" in encoded_image:
-            raise ValueError(encoded_image)
         base64_data_url = f"data:image/jpeg;base64,{encoded_image}"
         ocr_response = call_ocr_api({"type": "image_url", "image_url": base64_data_url})
-        try:
-            markdown = ocr_response.pages[0].markdown
-        except (IndexError, AttributeError):
-            markdown = "No text extracted or response invalid."
+        markdown = ocr_response.pages[0].markdown if ocr_response.pages else "No text extracted or response invalid."
         logger.info("Successfully processed uploaded image")
         return markdown
     except Exception as e:
@@ -137,7 +121,7 @@ def ocr_uploaded_image(image_file):
             os.remove(temp_path)
 
 # Document Understanding
-def document_understanding(doc_url, question):
+def document_understanding(doc_url: str, question: str) -> str:
     logger.info(f"Processing document understanding - URL: {doc_url}, Question: {question}")
     try:
         messages = [
@@ -147,10 +131,7 @@ def document_understanding(doc_url, question):
             ]}
         ]
         chat_response = call_chat_complete(model="mistral-small-latest", messages=messages)
-        try:
-            content = chat_response.choices[0].message.content
-        except (IndexError, AttributeError):
-            content = "No response received from the API."
+        content = chat_response.choices[0].message.content if chat_response.choices else "No response received from the API."
         logger.info("Successfully processed document understanding")
         return content
     except Exception as e:
@@ -175,26 +156,20 @@ class StructuredOCR(BaseModel):
     languages: list[Language]
     ocr_contents: dict
 
-def structured_ocr(image_file):
+def structured_ocr(image_file: Union[str, bytes]) -> str:
     logger.info(f"Processing structured OCR for image: {getattr(image_file, 'name', 'unknown')}")
     temp_path = None
     try:
-        # Get file content (handles both string and file-like objects)
         content = get_file_content(image_file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name
         image_path = Path(temp_path)
         encoded_image = encode_image(temp_path)
-        if "Error" in encoded_image:
-            raise ValueError(encoded_image)
         base64_data_url = f"data:image/jpeg;base64,{encoded_image}"
 
         image_response = call_ocr_api({"type": "image_url", "image_url": base64_data_url})
-        try:
-            image_ocr_markdown = image_response.pages[0].markdown
-        except (IndexError, AttributeError):
-            image_ocr_markdown = "No text extracted."
+        image_ocr_markdown = image_response.pages[0].markdown if image_response.pages else "No text extracted."
 
         chat_response = call_chat_complete(
             model="pixtral-12b-latest",
@@ -212,12 +187,8 @@ def structured_ocr(image_file):
             temperature=0
         )
 
-        try:
-            content = chat_response.choices[0].message.content
-            response_dict = json.loads(content)
-        except (json.JSONDecodeError, IndexError, AttributeError):
-            logger.error("Failed to parse structured response")
-            return "Failed to parse structured response. Please try again."
+        content = chat_response.choices[0].message.content if chat_response.choices else "{}"
+        response_dict = json.loads(content)
 
         language_members = {member.value: member for member in Language}
         valid_languages = [l for l in response_dict.get("languages", ["English"]) if l in language_members]
