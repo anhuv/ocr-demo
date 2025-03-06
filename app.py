@@ -3,13 +3,12 @@ import base64
 import gradio as gr
 from mistralai import Mistral
 from mistralai.models import OCRResponse
-from mistralai.exceptions import MistralException
 from pathlib import Path
 from pydantic import BaseModel
 import pycountry
 import json
 import logging
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_fixed
 import tempfile
 from typing import Union, Dict, List
 from contextlib import contextmanager
@@ -32,7 +31,7 @@ class OCRProcessor:
         self.client = Mistral(api_key=self.api_key)
         try:
             self.client.models.list()  # Validate API key
-        except MistralException as e:
+        except Exception as e:
             raise ValueError(f"Invalid API key: {str(e)}")
 
     @staticmethod
@@ -52,19 +51,19 @@ class OCRProcessor:
             if os.path.exists(temp_file.name):
                 os.unlink(temp_file.name)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _call_ocr_api(self, document: Dict) -> OCRResponse:
         try:
             return self.client.ocr.process(model="mistral-ocr-latest", document=document)
-        except MistralException as e:
+        except Exception as e:
             logger.error(f"OCR API call failed: {str(e)}")
             raise
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _call_chat_complete(self, model: str, messages: List[Dict], **kwargs) -> Dict:
         try:
             return self.client.chat.complete(model=model, messages=messages, **kwargs)
-        except MistralException as e:
+        except Exception as e:
             logger.error(f"Chat complete API call failed: {str(e)}")
             raise
 
@@ -176,7 +175,7 @@ class OCRProcessor:
     def _format_structured_response(file_path: str, content: Dict) -> str:
         languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
         valid_langs = [l for l in content.get("languages", [DEFAULT_LANGUAGE]) if l in languages.values()]
-        
+
         response = {
             "file_name": Path(file_path).name,
             "topics": content.get("topics", []),
@@ -195,7 +194,7 @@ def create_interface():
             placeholder="Enter your Mistral API key here",
             type="password"
         )
-        
+
         def initialize_processor(api_key):
             try:
                 processor = OCRProcessor(api_key)
