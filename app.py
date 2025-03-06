@@ -4,14 +4,13 @@ import gradio as gr
 from mistralai import Mistral
 from mistralai.models import OCRResponse
 from pathlib import Path
-from enum import Enum
 from pydantic import BaseModel
 import pycountry
 import json
 import logging
 from tenacity import retry, stop_after_attempt, wait_fixed
 import tempfile
-from typing import Union, Optional, Dict, List
+from typing import Union, Dict, List
 from contextlib import contextmanager
 
 # Constants
@@ -25,10 +24,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 class OCRProcessor:
-    def __init__(self):
-        self.api_key = os.environ.get("MISTRAL_API_KEY")
-        if not self.api_key:
-            raise ValueError("MISTRAL_API_KEY environment variable is not set")
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("API key must be provided")
+        self.api_key = api_key
         self.client = Mistral(api_key=self.api_key)
 
     @staticmethod
@@ -174,35 +173,83 @@ class OCRProcessor:
         return f"```json\n{json.dumps(response, indent=4)}\n```"
 
 def create_interface():
-    processor = OCRProcessor()
     with gr.Blocks(title="Mistral OCR & Structured Output App") as demo:
         gr.Markdown("# Mistral OCR & Structured Output App")
-        gr.Markdown("Extract text from PDFs and images or get structured JSON output")
+        gr.Markdown("Enter your Mistral API key below to use the app. Extract text from PDFs and images or get structured JSON output.")
+
+        # API Key input
+        api_key_input = gr.Textbox(
+            label="Mistral API Key",
+            placeholder="Enter your Mistral API key here",
+            type="password"  # Hide the API key for security
+        )
+        
+        # Function to initialize processor with API key
+        def initialize_processor(api_key):
+            try:
+                return OCRProcessor(api_key)
+            except Exception as e:
+                return str(e)
+
+        # Store processor state
+        processor_state = gr.State()
+
+        # Button to set API key
+        set_api_button = gr.Button("Set API Key")
+        api_status = gr.Markdown("API key not set. Please enter and set your key.")
+
+        # Update processor and status when API key is set
+        set_api_button.click(
+            fn=lambda key: (initialize_processor(key), "**Success:** API key set!" if not isinstance(initialize_processor(key), str) else f"**Error:** {initialize_processor(key)}"),
+            inputs=api_key_input,
+            outputs=[processor_state, api_status]
+        )
 
         tabs = [
-            ("OCR with PDF URL", gr.Textbox, processor.ocr_pdf_url, "PDF URL", None),
-            ("OCR with Uploaded PDF", gr.File, processor.ocr_uploaded_pdf, "Upload PDF", SUPPORTED_PDF_TYPES),
-            ("OCR with Image URL", gr.Textbox, processor.ocr_image_url, "Image URL", None),
-            ("OCR with Uploaded Image", gr.File, processor.ocr_uploaded_image, "Upload Image", SUPPORTED_IMAGE_TYPES),
-            ("Structured OCR", gr.File, processor.structured_ocr, "Upload Image", SUPPORTED_IMAGE_TYPES),
+            ("OCR with PDF URL", gr.Textbox, "ocr_pdf_url", "PDF URL", None),
+            ("OCR with Uploaded PDF", gr.File, "ocr_uploaded_pdf", "Upload PDF", SUPPORTED_PDF_TYPES),
+            ("OCR with Image URL", gr.Textbox, "ocr_image_url", "Image URL", None),
+            ("OCR with Uploaded Image", gr.File, "ocr_uploaded_image", "Upload Image", SUPPORTED_IMAGE_TYPES),
+            ("Structured OCR", gr.File, "structured_ocr", "Upload Image", SUPPORTED_IMAGE_TYPES),
         ]
 
-        for name, input_type, fn, label, file_types in tabs:
+        for name, input_type, fn_name, label, file_types in tabs:
             with gr.Tab(name):
                 if input_type == gr.Textbox:
                     inputs = input_type(label=label, placeholder=f"e.g., https://example.com/{label.lower().replace(' ', '')}")
                 else:  # gr.File
                     inputs = input_type(label=label, file_types=file_types)
                 output = gr.Markdown(label="Result")
-                # Use a more reliable way to get the button label
                 button_label = name.replace("OCR with ", "").replace("Structured ", "Get Structured ")
-                gr.Button(f"Process {button_label}").click(fn, inputs=inputs, outputs=output)
+
+                # Wrapper function to use processor from state
+                def process_with_api(processor, input_data):
+                    if not processor or isinstance(processor, str):
+                        return "**Error:** Please set a valid API key first."
+                    fn = getattr(processor, fn_name)
+                    return fn(input_data)
+
+                gr.Button(f"Process {button_label}").click(
+                    fn=process_with_api,
+                    inputs=[processor_state, inputs],
+                    outputs=output
+                )
 
         with gr.Tab("Document Understanding"):
             doc_url = gr.Textbox(label="Document URL", placeholder="e.g., https://arxiv.org/pdf/1805.04770")
             question = gr.Textbox(label="Question", placeholder="e.g., What is the last sentence?")
             output = gr.Markdown(label="Answer")
-            gr.Button("Ask Question").click(processor.document_understanding, inputs=[doc_url, question], outputs=output)
+
+            def doc_understanding_with_api(processor, url, q):
+                if not processor or isinstance(processor, str):
+                    return "**Error:** Please set a valid API key first."
+                return processor.document_understanding(url, q)
+
+            gr.Button("Ask Question").click(
+                fn=doc_understanding_with_api,
+                inputs=[processor_state, doc_url, question],
+                outputs=output
+            )
 
     return demo
 
