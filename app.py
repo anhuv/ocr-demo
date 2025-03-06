@@ -3,7 +3,7 @@ import base64
 import gradio as gr
 from mistralai import Mistral
 from mistralai.models import OCRResponse
-from mistralai.exceptions import MistralException  # Import Mistral-specific exceptions
+from mistralai.exceptions import MistralException
 from pathlib import Path
 from pydantic import BaseModel
 import pycountry
@@ -30,9 +30,8 @@ class OCRProcessor:
             raise ValueError("API key must be provided")
         self.api_key = api_key
         self.client = Mistral(api_key=self.api_key)
-        # Test API key validity on initialization
         try:
-            self.client.models.list()  # Simple API call to validate key
+            self.client.models.list()  # Validate API key
         except MistralException as e:
             raise ValueError(f"Invalid API key: {str(e)}")
 
@@ -53,7 +52,7 @@ class OCRProcessor:
             if os.path.exists(temp_file.name):
                 os.unlink(temp_file.name)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type(MistralException))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
     def _call_ocr_api(self, document: Dict) -> OCRResponse:
         try:
             return self.client.ocr.process(model="mistral-ocr-latest", document=document)
@@ -61,7 +60,7 @@ class OCRProcessor:
             logger.error(f"OCR API call failed: {str(e)}")
             raise
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type(MistralException))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
     def _call_chat_complete(self, model: str, messages: List[Dict], **kwargs) -> Dict:
         try:
             return self.client.chat.complete(model=model, messages=messages, **kwargs)
@@ -191,14 +190,12 @@ def create_interface():
         gr.Markdown("# Mistral OCR & Structured Output App")
         gr.Markdown("Enter your Mistral API key below to use the app. Extract text from PDFs and images or get structured JSON output.")
 
-        # API Key input
         api_key_input = gr.Textbox(
             label="Mistral API Key",
             placeholder="Enter your Mistral API key here",
             type="password"
         )
         
-        # Function to initialize processor with API key
         def initialize_processor(api_key):
             try:
                 processor = OCRProcessor(api_key)
@@ -208,11 +205,9 @@ def create_interface():
             except Exception as e:
                 return None, f"**Error:** Unexpected error: {str(e)}"
 
-        # Store processor state
         processor_state = gr.State()
         api_status = gr.Markdown("API key not set. Please enter and set your key.")
 
-        # Button to set API key
         set_api_button = gr.Button("Set API Key")
         set_api_button.click(
             fn=initialize_processor,
@@ -232,7 +227,7 @@ def create_interface():
             with gr.Tab(name):
                 if input_type == gr.Textbox:
                     inputs = input_type(label=label, placeholder=f"e.g., https://example.com/{label.lower().replace(' ', '')}")
-                else:  # gr.File
+                else:
                     inputs = input_type(label=label, file_types=file_types)
                 output = gr.Markdown(label="Result")
                 button_label = name.replace("OCR with ", "").replace("Structured ", "Get Structured ")
