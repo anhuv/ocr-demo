@@ -3,16 +3,16 @@ import base64
 import gradio as gr
 from mistralai import Mistral
 from mistralai.models import OCRResponse
+from mistralai.exceptions import MistralException
 from pathlib import Path
 from pydantic import BaseModel
 import pycountry
 import json
 import logging
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 import tempfile
 from typing import Union, Dict, List
 from contextlib import contextmanager
-import requests
 
 # Constants
 DEFAULT_LANGUAGE = "English"
@@ -32,7 +32,7 @@ class OCRProcessor:
         self.client = Mistral(api_key=self.api_key)
         try:
             self.client.models.list()  # Validate API key
-        except Exception as e:
+        except MistralException as e:
             raise ValueError(f"Invalid API key: {str(e)}")
 
     @staticmethod
@@ -52,33 +52,26 @@ class OCRProcessor:
             if os.path.exists(temp_file.name):
                 os.unlink(temp_file.name)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
     def _call_ocr_api(self, document: Dict) -> OCRResponse:
         try:
             return self.client.ocr.process(model="mistral-ocr-latest", document=document)
-        except Exception as e:
+        except MistralException as e:
             logger.error(f"OCR API call failed: {str(e)}")
             raise
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type=MistralException)
     def _call_chat_complete(self, model: str, messages: List[Dict], **kwargs) -> Dict:
         try:
             return self.client.chat.complete(model=model, messages=messages, **kwargs)
-        except Exception as e:
+        except MistralException as e:
             logger.error(f"Chat complete API call failed: {str(e)}")
             raise
 
     def _get_file_content(self, file_input: Union[str, bytes]) -> bytes:
         if isinstance(file_input, str):
-            if file_input.startswith("http"):
-                # Handle URLs
-                response = requests.get(file_input)
-                response.raise_for_status()
-                return response.content
-            else:
-                # Handle local file paths
-                with open(file_input, "rb") as f:
-                    return f.read()
+            with open(file_input, "rb") as f:
+                return f.read()
         return file_input.read() if hasattr(file_input, 'read') else file_input
 
     def ocr_pdf_url(self, pdf_url: str) -> str:
@@ -165,12 +158,7 @@ class OCRProcessor:
                     temperature=0
                 )
 
-                # Ensure the response is a dictionary
-                response_content = chat_response.choices[0].message.content
-                if isinstance(response_content, list):
-                    response_content = response_content[0] if response_content else "{}"
-
-                content = json.loads(response_content)
+                content = json.loads(chat_response.choices[0].message.content if chat_response.choices else "{}")
                 return self._format_structured_response(temp_path, content)
         except Exception as e:
             return self._handle_error("structured OCR", e)
@@ -188,7 +176,7 @@ class OCRProcessor:
     def _format_structured_response(file_path: str, content: Dict) -> str:
         languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
         valid_langs = [l for l in content.get("languages", [DEFAULT_LANGUAGE]) if l in languages.values()]
-
+        
         response = {
             "file_name": Path(file_path).name,
             "topics": content.get("topics", []),
@@ -207,7 +195,7 @@ def create_interface():
             placeholder="Enter your Mistral API key here",
             type="password"
         )
-
+        
         def initialize_processor(api_key):
             try:
                 processor = OCRProcessor(api_key)
