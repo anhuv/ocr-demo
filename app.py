@@ -144,4 +144,6 @@ with gr.Blocks(title="Mistral OCR & Document Understanding App") as demo:
         doc_button.click(document_understanding, inputs=[doc_url_input, question_input], outputs=doc_output)
 
 # Launch the app
-demo.launch()
+demo.launch(
+    share=True,
+)
