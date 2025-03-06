@@ -140,7 +140,7 @@ class OCRProcessor:
                 base64_url = f"data:image/jpeg;base64,{encoded_image}"
                 ocr_response = self._call_ocr_api({"type": "image_url", "image_url": base64_url})
                 markdown = self._extract_markdown(ocr_response)
-
+    
                 chat_response = self._call_chat_complete(
                     model="pixtral-12b-latest",
                     messages=[{
@@ -156,11 +156,17 @@ class OCRProcessor:
                     response_format={"type": "json_object"},
                     temperature=0
                 )
-
-                content = json.loads(chat_response.choices[0].message.content if chat_response.choices else "{}")
+    
+                # Ensure the response is a dictionary
+                response_content = chat_response.choices[0].message.content
+                if isinstance(response_content, list):
+                    response_content = response_content[0] if response_content else "{}"
+    
+                content = json.loads(response_content)
                 return self._format_structured_response(temp_path, content)
         except Exception as e:
             return self._handle_error("structured OCR", e)
+
 
     @staticmethod
     def _extract_markdown(response: OCRResponse) -> str:
