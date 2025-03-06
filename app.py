@@ -3,12 +3,13 @@ import base64
 import gradio as gr
 from mistralai import Mistral
 from mistralai.models import OCRResponse
+from mistralai.exceptions import MistralException  # Import Mistral-specific exceptions
 from pathlib import Path
 from pydantic import BaseModel
 import pycountry
 import json
 import logging
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 import tempfile
 from typing import Union, Dict, List
 from contextlib import contextmanager
@@ -29,6 +30,11 @@ class OCRProcessor:
             raise ValueError("API key must be provided")
         self.api_key = api_key
         self.client = Mistral(api_key=self.api_key)
+        # Test API key validity on initialization
+        try:
+            self.client.models.list()  # Simple API call to validate key
+        except MistralException as e:
+            raise ValueError(f"Invalid API key: {str(e)}")
 
     @staticmethod
     def _encode_image(image_path: str) -> str:
@@ -47,13 +53,21 @@ class OCRProcessor:
             if os.path.exists(temp_file.name):
                 os.unlink(temp_file.name)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type(MistralException))
     def _call_ocr_api(self, document: Dict) -> OCRResponse:
-        return self.client.ocr.process(model="mistral-ocr-latest", document=document)
+        try:
+            return self.client.ocr.process(model="mistral-ocr-latest", document=document)
+        except MistralException as e:
+            logger.error(f"OCR API call failed: {str(e)}")
+            raise
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry_if_exception_type(MistralException))
     def _call_chat_complete(self, model: str, messages: List[Dict], **kwargs) -> Dict:
-        return self.client.chat.complete(model=model, messages=messages, **kwargs)
+        try:
+            return self.client.chat.complete(model=model, messages=messages, **kwargs)
+        except MistralException as e:
+            logger.error(f"Chat complete API call failed: {str(e)}")
+            raise
 
     def _get_file_content(self, file_input: Union[str, bytes]) -> bytes:
         if isinstance(file_input, str):
@@ -181,26 +195,27 @@ def create_interface():
         api_key_input = gr.Textbox(
             label="Mistral API Key",
             placeholder="Enter your Mistral API key here",
-            type="password"  # Hide the API key for security
+            type="password"
         )
         
         # Function to initialize processor with API key
         def initialize_processor(api_key):
             try:
-                return OCRProcessor(api_key)
+                processor = OCRProcessor(api_key)
+                return processor, "**Success:** API key set and validated!"
+            except ValueError as e:
+                return None, f"**Error:** {str(e)}"
             except Exception as e:
-                return str(e)
+                return None, f"**Error:** Unexpected error: {str(e)}"
 
         # Store processor state
         processor_state = gr.State()
+        api_status = gr.Markdown("API key not set. Please enter and set your key.")
 
         # Button to set API key
         set_api_button = gr.Button("Set API Key")
-        api_status = gr.Markdown("API key not set. Please enter and set your key.")
-
-        # Update processor and status when API key is set
         set_api_button.click(
-            fn=lambda key: (initialize_processor(key), "**Success:** API key set!" if not isinstance(initialize_processor(key), str) else f"**Error:** {initialize_processor(key)}"),
+            fn=initialize_processor,
             inputs=api_key_input,
             outputs=[processor_state, api_status]
         )
@@ -222,9 +237,8 @@ def create_interface():
                 output = gr.Markdown(label="Result")
                 button_label = name.replace("OCR with ", "").replace("Structured ", "Get Structured ")
 
-                # Wrapper function to use processor from state
                 def process_with_api(processor, input_data):
-                    if not processor or isinstance(processor, str):
+                    if not processor:
                         return "**Error:** Please set a valid API key first."
                     fn = getattr(processor, fn_name)
                     return fn(input_data)
@@ -241,7 +255,7 @@ def create_interface():
             output = gr.Markdown(label="Answer")
 
             def doc_understanding_with_api(processor, url, q):
-                if not processor or isinstance(processor, str):
+                if not processor:
                     return "**Error:** Please set a valid API key first."
                 return processor.document_understanding(url, q)
 
