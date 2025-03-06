@@ -3,3 +3,4 @@ pycountry
 pymupdf
 tenacity
 requests
+mistralai
