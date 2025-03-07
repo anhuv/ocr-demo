@@ -3,7 +3,7 @@ import base64
 import gradio as gr
 from mistralai import Mistral, ImageURLChunk
 from mistralai.models import OCRResponse
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Any
 import requests
 import shutil
 import time
@@ -203,7 +203,7 @@ class OCRProcessor:
         except Exception as e:
             return self._handle_error("PDF URL processing", e), []
 
-    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> Tuple[str, gr.components.Image.update]:
+    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> Tuple[str, Any]:
         file_name = getattr(image_file, 'name', f"image_{int(time.time())}.jpg")
         logger.info(f"Processing uploaded image: {file_name}")
         try:
@@ -261,7 +261,7 @@ class OCRProcessor:
 
     @staticmethod
     def _handle_error(context: str, error: Exception) -> str:
-        logger.error(f"Error in {context}: {str(error)}")
+        logger.error(f"Error in {context}: {str(e)}")
         return f"**Error in {context}:** {str(error)}"
 
 def create_interface():
