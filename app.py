@@ -316,7 +316,7 @@ def create_interface():
     .status {color: #666; font-style: italic;}
     """
     
-    with gr.Blocks(title="Mistral OCR App", css=css) as demo:
+    with gr.Blocks(title="Mistral OCR API Demo", css=css) as demo:
         gr.Markdown("# Mistral OCR App\nUpload images or PDFs, or provide a PDF URL for OCR processing")
         
         with gr.Row():
