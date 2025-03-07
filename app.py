@@ -203,7 +203,7 @@ class OCRProcessor:
         except Exception as e:
             return self._handle_error("PDF URL processing", e), []
 
-    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> Tuple[str, str]:
+    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> Tuple[str, gr.components.Image.update]:
         file_name = getattr(image_file, 'name', f"image_{int(time.time())}.jpg")
         logger.info(f"Processing uploaded image: {file_name}")
         try:
@@ -212,9 +212,10 @@ class OCRProcessor:
             encoded_image = self._encode_image(image_path)
             response = self._call_ocr_api(encoded_image)
             markdown_with_images = self._get_combined_markdown_with_images(response)
-            return markdown_with_images or "No text detected in image", image_path
+            preview_update = gr.Image.update(value=image_path) if image_path else gr.Image.update()
+            return markdown_with_images or "No text detected in image", preview_update
         except Exception as e:
-            return self._handle_error("image processing", e), None
+            return self._handle_error("image processing", e), gr.Image.update()
 
     @staticmethod
     def _get_combined_markdown_with_images(response: OCRResponse, image_paths: List[str] = None, page_index: int = None) -> str:
@@ -304,10 +305,9 @@ def create_interface():
 
             def process_image(processor, image):
                 if not processor or not image:
-                    return "Please set API key and upload an image", None
-                result, image_path = processor.ocr_uploaded_image(image)
-                preview = gr.Image.update(value=image_path) if image_path else gr.Image.update()
-                return result, preview
+                    return "Please set API key and upload an image", gr.Image.update()
+                result, preview_update = processor.ocr_uploaded_image(image)
+                return result, preview_update
 
             process_image_btn.click(
                 fn=process_image,
