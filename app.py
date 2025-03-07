@@ -2,7 +2,7 @@ import os
 import base64
 import gradio as gr
 import json
-import re  # Added to fix NameError
+import re
 from mistralai import Mistral, DocumentURLChunk, ImageURLChunk, TextChunk
 from mistralai.models import OCRResponse
 from typing import Union, List, Tuple, Dict
@@ -13,8 +13,6 @@ import pymupdf as fitz
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 from concurrent.futures import ThreadPoolExecutor
-import socket
-from requests.exceptions import ConnectionError, Timeout
 from pathlib import Path
 from pydantic import BaseModel
 import pycountry
@@ -37,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Language Enum for StructuredOCR
+# Language Enum
 languages = {lang.alpha_2: lang.name for lang in pycountry.languages if hasattr(lang, 'alpha_2')}
 
 class LanguageMeta(Enum.__class__):
@@ -80,8 +78,8 @@ class OCRProcessor:
             raise ValueError(f"API key validation failed: {str(e)}")
 
     @staticmethod
-    def _check_file_size(file_input: Union[str, bytes]) -> None:
-        if isinstance(file_input, str) and os.path.exists(file_input):
+    def _check_file_size(file_input: Union[str, bytes, Path]) -> None:
+        if isinstance(file_input, (str, Path)) and os.path.exists(file_input):
             size = os.path.getsize(file_input)
         elif hasattr(file_input, 'read'):
             size = len(file_input.read())
@@ -92,18 +90,18 @@ class OCRProcessor:
             raise ValueError(f"File size exceeds {MAX_FILE_SIZE/1024/1024}MB limit")
 
     @staticmethod
-    def _save_uploaded_file(file_input: Union[str, bytes], filename: str) -> str:
+    def _save_uploaded_file(file_input: Union[str, bytes, Path], filename: str) -> str:
         clean_filename = os.path.basename(filename).replace(os.sep, "_")
         file_path = os.path.join(UPLOAD_FOLDER, f"{int(time.time())}_{clean_filename}")
         
         try:
-            if isinstance(file_input, str) and file_input.startswith("http"):
+            if isinstance(file_input, (str, Path)) and str(file_input).startswith("http"):
                 logger.info(f"Downloading from URL: {file_input}")
                 response = requests.get(file_input, timeout=30)
                 response.raise_for_status()
                 with open(file_path, 'wb') as f:
                     f.write(response.content)
-            elif isinstance(file_input, str) and os.path.exists(file_input):
+            elif isinstance(file_input, (str, Path)) and os.path.exists(file_input):
                 logger.info(f"Copying local file: {file_input}")
                 shutil.copy2(file_input, file_path)
             else:
@@ -126,7 +124,7 @@ class OCRProcessor:
         try:
             with open(image_path, "rb") as image_file:
                 encoded = base64.b64encode(image_file.read()).decode('utf-8')
-                logger.info(f"Encoded image {image_path} to base64 (length: {len(encoded)})")
+                logger.info(f"Encoded image {image_path} (length: {len(encoded)})")
                 return encoded
         except Exception as e:
             logger.error(f"Error encoding image {image_path}: {str(e)}")
@@ -172,7 +170,7 @@ class OCRProcessor:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call_ocr_api(self, encoded_image: str) -> OCRResponse:
-        logger.info(f"Calling OCR API with API key: {self.api_key[:4]}...")  # Log partial key for debugging
+        logger.info("Calling OCR API")
         if not isinstance(encoded_image, str):
             raise TypeError(f"Expected encoded_image to be a string, got {type(encoded_image)}")
         base64_url = f"data:image/png;base64,{encoded_image}"
@@ -183,22 +181,16 @@ class OCRProcessor:
                 include_image_base64=True
             )
             logger.info("OCR API call successful")
-            try:
-                if hasattr(response, 'model_dump_json'):
-                    response_dict = json.loads(response.model_dump_json())
-                else:
-                    response_dict = {k: v for k, v in response.__dict__.items() if isinstance(v, (str, int, float, list, dict))}
-                logger.info(f"Raw OCR response: {json.dumps(response_dict, default=str, indent=4)}")
-            except Exception as log_err:
-                logger.warning(f"Failed to log raw OCR response: {str(log_err)}")
             return response
         except Exception as e:
-            logger.error(f"OCR API error: {str(e)}", exc_info=True)
+            if "401" in str(e) or "authentication" in str(e).lower():
+                raise ValueError("Authentication failed: Invalid API key")
+            logger.error(f"OCR API error: {str(e)}")
             raise
 
     def _process_pdf_with_ocr(self, pdf_path: str) -> Tuple[str, List[str], List[Dict]]:
         try:
-            logger.info(f"Processing PDF with API key: {self.api_key[:4]}...")
+            logger.info(f"Processing PDF: {pdf_path}")
             uploaded_file = self.client.files.upload(
                 file={"file_name": Path(pdf_path).stem, "content": Path(pdf_path).read_bytes()},
                 purpose="ocr",
@@ -214,26 +206,21 @@ class OCRProcessor:
             json_results = self._convert_to_structured_json(markdown, pdf_path)
             image_paths = []
             if not any(page.images for page in ocr_response.pages):
-                logger.warning("No images found in OCR response; using local images")
+                logger.warning("No images in OCR response; using local conversion")
                 image_data = self._pdf_to_images(pdf_path)
                 image_paths = [path for path, _ in image_data]
             else:
                 image_paths = [os.path.join(UPLOAD_FOLDER, f"ocr_page_{i}.png") for i in range(len(ocr_response.pages))]
                 for i, base64_img in enumerate(base64_images):
-                    if base64_img:
+                    if base64_img and ',' in base64_img:
                         try:
                             img_data = base64.b64decode(base64_img.split(',')[1])
                             with open(image_paths[i], "wb") as f:
                                 f.write(img_data)
-                            if os.path.exists(image_paths[i]):
-                                logger.info(f"Image {image_paths[i]} saved and exists")
-                            else:
-                                logger.error(f"Image {image_paths[i]} saved but does not exist")
                         except Exception as e:
                             logger.error(f"Error saving image {i}: {str(e)}")
                             image_paths[i] = None
                 image_paths = [path for path in image_paths if path and os.path.exists(path)]
-            logger.info(f"Final image paths: {image_paths}")
             return markdown, image_paths, json_results
         except Exception as e:
             return self._handle_error("PDF OCR processing", e), [], []
@@ -245,31 +232,25 @@ class OCRProcessor:
             image_data = {}
             for img in page.images:
                 if img.image_base64:
-                    # Use correct MIME type based on image format (assuming JPEG from logs)
                     base64_url = f"data:image/jpeg;base64,{img.image_base64}"
                     image_data[img.id] = base64_url
                     base64_images.append(base64_url)
-                    logger.info(f"Base64 image {img.id} length: {len(img.image_base64)}")
                 else:
                     base64_images.append(None)
             markdown = page.markdown or "No text detected"
             markdown = replace_images_in_markdown(markdown, image_data)
-            logger.info(f"Page {i} markdown (first 200 chars): {markdown[:200]}...")
             markdowns.append(markdown)
         return "\n\n".join(markdowns), base64_images
 
     def _convert_to_structured_json(self, markdown: str, file_path: str) -> List[Dict]:
         try:
             text_only_markdown = re.sub(r'!\[.*?\]\(data:image/[^)]+\)', '', markdown)
-            logger.info(f"Text-only markdown length: {len(text_only_markdown)}")
-            logger.info(f"Text-only markdown content: {text_only_markdown[:200]}...")
-
             chat_response = self.client.chat.parse(
                 model="pixtral-12b-latest",
                 messages=[
                     {
                         "role": "user",
-                        "content": f"Given OCR output from a PDF about African history and artifacts, convert to JSON with file_name, topics (e.g., African Artifacts, Tribal History), languages (e.g., English), and ocr_contents (title and list of items with descriptions and image refs).\n\nOCR Output:\n{text_only_markdown}"
+                        "content": f"Convert OCR output to JSON with file_name, topics, languages, and ocr_contents.\n\nOCR Output:\n{text_only_markdown}"
                     },
                 ],
                 response_format=StructuredOCR,
@@ -277,13 +258,12 @@ class OCRProcessor:
             )
             structured_result = chat_response.choices[0].message.parsed
             json_str = structured_result.model_dump_json()
-            logger.info(f"Structured JSON: {json_str}")
             return [json.loads(json_str)]
         except Exception as e:
-            logger.error(f"Error converting to structured JSON: {str(e)}", exc_info=True)
+            logger.error(f"Error converting to JSON: {str(e)}")
             return [{"error": str(e), "file_name": Path(file_path).stem}]
 
-    def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> Tuple[str, List[str], List[Dict]]:
+    def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes, Path]) -> Tuple[str, List[str], List[Dict]]:
         file_path = self._save_uploaded_file(pdf_file, getattr(pdf_file, 'name', f"pdf_{int(time.time())}.pdf"))
         return self._process_pdf_with_ocr(file_path)
 
@@ -291,10 +271,9 @@ class OCRProcessor:
         file_path = self._save_uploaded_file(pdf_url, pdf_url.split('/')[-1] or f"pdf_{int(time.time())}.pdf")
         return self._process_pdf_with_ocr(file_path)
 
-    def ocr_uploaded_image(self, image_file: Union[str, bytes]) -> Tuple[str, str, Dict]:
+    def ocr_uploaded_image(self, image_file: Union[str, bytes, Path]) -> Tuple[str, str, Dict]:
         file_path = self._save_uploaded_file(image_file, getattr(image_file, 'name', f"image_{int(time.time())}.jpg"))
         encoded_image = self._encode_image(file_path)
-        base64_url = f"data:image/png;base64,{encoded_image}"
         response = self._call_ocr_api(encoded_image)
         markdown, base64_images = self._get_combined_markdown(response)
         json_result = self._convert_to_structured_json(markdown, file_path)[0]
@@ -302,7 +281,7 @@ class OCRProcessor:
 
     @staticmethod
     def _handle_error(context: str, error: Exception) -> str:
-        logger.error(f"Error in {context}: {str(error)}", exc_info=True)
+        logger.error(f"Error in {context}: {str(error)}")
         return f"**Error in {context}:** {str(error)}"
 
 def replace_images_in_markdown(markdown_str: str, images_dict: dict) -> str:
@@ -351,8 +330,10 @@ def create_interface():
             process_image_btn = gr.Button("Process Image", variant="primary")
 
             def process_image(processor, image):
-                if not processor or not image:
-                    return "Please set API key and upload an image", None, {}
+                if not processor:
+                    return "Please set API key", None, {}
+                if not image:
+                    return "Please upload an image", None, {}
                 markdown, image_path, json_data = processor.ocr_uploaded_image(image)
                 return markdown, image_path, json_data
 
@@ -380,22 +361,19 @@ def create_interface():
 
             def process_pdf(processor, pdf_file, pdf_url):
                 if not processor:
-                    return "Please set API key first", [], {}
-                logger.info(f"Received inputs - PDF file: {pdf_file}, PDF URL: {pdf_url}")
-                if pdf_file is not None and hasattr(pdf_file, 'name'):
-                    logger.info(f"Processing as uploaded PDF: {pdf_file.name}")
+                    return "Please set API key", [], {}, "Please set API key"
+                if pdf_file:
                     markdown, image_paths, json_data = processor.ocr_uploaded_pdf(pdf_file)
                 elif pdf_url and pdf_url.strip():
-                    logger.info(f"Processing as PDF URL: {pdf_url}")
                     markdown, image_paths, json_data = processor.ocr_pdf_url(pdf_url)
                 else:
-                    return "Please upload a PDF or provide a valid URL", [], {}
-                return markdown, image_paths, json_data
+                    return "Please upload a PDF or provide a URL", [], {}, "No input provided"
+                return markdown, image_paths, json_data, "✅ Processing complete"
 
             process_pdf_btn.click(
                 fn=process_pdf,
                 inputs=[processor_state, pdf_input, pdf_url_input],
-                outputs=[pdf_output, pdf_gallery, pdf_json_output]
+                outputs=[pdf_output, pdf_gallery, pdf_json_output, status]
             )
 
     return demo
