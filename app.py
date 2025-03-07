@@ -2,6 +2,7 @@ import os
 import base64
 import gradio as gr
 import json
+import re  # Added to fix NameError
 from mistralai import Mistral, DocumentURLChunk, ImageURLChunk, TextChunk
 from mistralai.models import OCRResponse
 from typing import Union, List, Tuple, Dict
@@ -55,7 +56,6 @@ class StructuredOCR(BaseModel):
     ocr_contents: dict
 
     def model_dump_json(self, **kwargs):
-        # Custom JSON serialization to handle Language enums
         data = self.model_dump(exclude_unset=True, by_alias=True, mode='json')
         for key, value in data.items():
             if isinstance(value, list) and all(isinstance(item, Language) for item in value):
@@ -66,6 +66,7 @@ class OCRProcessor:
     def __init__(self, api_key: str):
         if not api_key or not isinstance(api_key, str):
             raise ValueError("Valid API key must be provided")
+        self.api_key = api_key
         self.client = Mistral(api_key=api_key)
         self._validate_client()
 
@@ -74,6 +75,7 @@ class OCRProcessor:
             models = self.client.models.list()
             if not models:
                 raise ValueError("No models available")
+            logger.info("API key validated successfully")
         except Exception as e:
             raise ValueError(f"API key validation failed: {str(e)}")
 
@@ -170,11 +172,11 @@ class OCRProcessor:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call_ocr_api(self, encoded_image: str) -> OCRResponse:
+        logger.info(f"Calling OCR API with API key: {self.api_key[:4]}...")  # Log partial key for debugging
         if not isinstance(encoded_image, str):
             raise TypeError(f"Expected encoded_image to be a string, got {type(encoded_image)}")
         base64_url = f"data:image/png;base64,{encoded_image}"
         try:
-            logger.info("Calling OCR API")
             response = self.client.ocr.process(
                 document=ImageURLChunk(image_url=base64_url),
                 model="mistral-ocr-latest",
@@ -190,26 +192,19 @@ class OCRProcessor:
             except Exception as log_err:
                 logger.warning(f"Failed to log raw OCR response: {str(log_err)}")
             return response
-        except (ConnectionError, TimeoutError, socket.error) as e:
-            logger.error(f"Network error during OCR API call: {str(e)}")
-            raise
-        except TypeError as e:
-            logger.error(f"TypeError in OCR API call: {str(e)}", exc_info=True)
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error in OCR API call: {str(e)}", exc_info=True)
+            logger.error(f"OCR API error: {str(e)}", exc_info=True)
             raise
 
     def _process_pdf_with_ocr(self, pdf_path: str) -> Tuple[str, List[str], List[Dict]]:
         try:
-            # Upload PDF and get signed URL
+            logger.info(f"Processing PDF with API key: {self.api_key[:4]}...")
             uploaded_file = self.client.files.upload(
                 file={"file_name": Path(pdf_path).stem, "content": Path(pdf_path).read_bytes()},
                 purpose="ocr",
             )
             signed_url = self.client.files.get_signed_url(file_id=uploaded_file.id, expiry=1).url
 
-            # Process with OCR
             ocr_response = self.client.ocr.process(
                 document=DocumentURLChunk(document_url=signed_url),
                 model="mistral-ocr-latest",
@@ -217,7 +212,6 @@ class OCRProcessor:
             )
             markdown, base64_images = self._get_combined_markdown(ocr_response)
             json_results = self._convert_to_structured_json(markdown, pdf_path)
-            # Fallback to local images if OCR images are missing
             image_paths = []
             if not any(page.images for page in ocr_response.pages):
                 logger.warning("No images found in OCR response; using local images")
@@ -251,7 +245,8 @@ class OCRProcessor:
             image_data = {}
             for img in page.images:
                 if img.image_base64:
-                    base64_url = f"data:image/png;base64,{img.image_base64}"
+                    # Use correct MIME type based on image format (assuming JPEG from logs)
+                    base64_url = f"data:image/jpeg;base64,{img.image_base64}"
                     image_data[img.id] = base64_url
                     base64_images.append(base64_url)
                     logger.info(f"Base64 image {img.id} length: {len(img.image_base64)}")
@@ -395,17 +390,12 @@ def create_interface():
                     markdown, image_paths, json_data = processor.ocr_pdf_url(pdf_url)
                 else:
                     return "Please upload a PDF or provide a valid URL", [], {}
-                # Fallback to display images if markdown rendering fails
-                image_components = []
-                for path in image_paths:
-                    if path and os.path.exists(path):
-                        image_components.append(gr.Image(path, label=f"Page Image"))
-                return markdown, image_paths, json_data, gr.Column(*image_components) if image_components else gr.Markdown("No images available")
+                return markdown, image_paths, json_data
 
             process_pdf_btn.click(
                 fn=process_pdf,
                 inputs=[processor_state, pdf_input, pdf_url_input],
-                outputs=[pdf_output, pdf_gallery, pdf_json_output, gr.Column()]
+                outputs=[pdf_output, pdf_gallery, pdf_json_output]
             )
 
     return demo
