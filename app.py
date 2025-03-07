@@ -110,7 +110,10 @@ class OCRProcessor:
                     range(pdf_document.page_count)
                 ))
             pdf_document.close()
-            return [data for data in image_data if data]
+            valid_data = [data for data in image_data if data and data[0] and os.path.exists(data[0])]
+            if not valid_data:
+                logger.warning("No valid images generated from PDF")
+            return valid_data
         except Exception as e:
             logger.error(f"Error converting PDF to images: {str(e)}")
             return []
@@ -140,10 +143,15 @@ class OCRProcessor:
                 document=ImageURLChunk(image_url=base64_url),
                 include_image_base64=True
             )
-            logger.info("OCR API call successful")
+            logger.info(f"OCR API call successful. Pages: {len(response.pages)}")
+            for page in response.pages:
+                logger.debug(f"Page markdown: {page.markdown}")
             return response
         except (ConnectionError, Timeout, socket.error) as e:
             logger.error(f"Network error during OCR API call: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"OCR API error: {str(e)}")
             raise
 
     def ocr_uploaded_pdf(self, pdf_file: Union[str, bytes]) -> Tuple[str, List[str]]:
@@ -158,7 +166,7 @@ class OCRProcessor:
             
             image_data = self._pdf_to_images(pdf_path)
             if not image_data:
-                raise ValueError("No pages converted from PDF")
+                return "No valid pages converted from PDF", []
             
             ocr_results = []
             image_paths = [path for path, _ in image_data]
@@ -167,7 +175,7 @@ class OCRProcessor:
                 markdown_with_images = self._get_combined_markdown_with_images(response, image_paths, i)
                 ocr_results.append(markdown_with_images)
             
-            return "\n\n".join(ocr_results), image_paths
+            return "\n\n".join(ocr_results) or "No text detected in PDF", image_paths
         except Exception as e:
             return self._handle_error("uploaded PDF processing", e), []
 
@@ -182,7 +190,7 @@ class OCRProcessor:
             
             image_data = self._pdf_to_images(pdf_path)
             if not image_data:
-                raise ValueError("No pages converted from PDF")
+                return "No valid pages converted from PDF", []
             
             ocr_results = []
             image_paths = [path for path, _ in image_data]
@@ -191,7 +199,7 @@ class OCRProcessor:
                 markdown_with_images = self._get_combined_markdown_with_images(response, image_paths, i)
                 ocr_results.append(markdown_with_images)
             
-            return "\n\n".join(ocr_results), image_paths
+            return "\n\n".join(ocr_results) or "No text detected in PDF", image_paths
         except Exception as e:
             return self._handle_error("PDF URL processing", e), []
 
@@ -203,17 +211,19 @@ class OCRProcessor:
             image_path = self._save_uploaded_file(image_file, file_name)
             encoded_image = self._encode_image(image_path)
             response = self._call_ocr_api(encoded_image)
-            return self._get_combined_markdown_with_images(response), image_path
+            markdown_with_images = self._get_combined_markdown_with_images(response)
+            return markdown_with_images or "No text detected in image", image_path
         except Exception as e:
             return self._handle_error("image processing", e), None
 
     @staticmethod
     def _get_combined_markdown_with_images(response: OCRResponse, image_paths: List[str] = None, page_index: int = None) -> str:
         markdown_parts = []
+        logger.info(f"Processing response with {len(response.pages)} pages")
         for i, page in enumerate(response.pages):
-            if page.markdown.strip():
-                markdown = page.markdown
-                logger.info(f"Page {i} markdown: {markdown}")
+            if page.markdown and page.markdown.strip():
+                markdown = page.markdown.strip()
+                logger.info(f"Page {i} markdown: {markdown[:100]}...")  # Log first 100 chars
                 if hasattr(page, 'images') and page.images:
                     logger.info(f"Found {len(page.images)} images in page {i}")
                     for img in page.images:
@@ -233,10 +243,8 @@ class OCRProcessor:
                                 )
                 else:
                     logger.warning(f"No images found in page {i}")
-                    # Replace known placeholders or append the local image
                     if image_paths and page_index is not None and page_index < len(image_paths):
                         local_encoded = OCRProcessor._encode_image(image_paths[page_index])
-                        # Replace placeholders like img-0.jpeg
                         placeholder = f"img-{i}.jpeg"
                         if placeholder in markdown:
                             markdown = markdown.replace(
@@ -244,9 +252,10 @@ class OCRProcessor:
                                 f"![Page {i} Image](data:image/png;base64,{local_encoded})"
                             )
                         else:
-                            # Append the image if no placeholder is found
                             markdown += f"\n\n![Page {i} Image](data:image/png;base64,{local_encoded})"
                 markdown_parts.append(markdown)
+            else:
+                logger.warning(f"No markdown content in page {i}")
         return "\n\n".join(markdown_parts) or "No text or images detected"
 
     @staticmethod
@@ -296,7 +305,9 @@ def create_interface():
             def process_image(processor, image):
                 if not processor or not image:
                     return "Please set API key and upload an image", None
-                return processor.ocr_uploaded_image(image)
+                result, image_path = processor.ocr_uploaded_image(image)
+                preview = gr.Image.update(value=image_path) if image_path else gr.Image.update()
+                return result, preview
 
             process_image_btn.click(
                 fn=process_image,
@@ -321,15 +332,19 @@ def create_interface():
 
             def process_pdf(processor, pdf_file, pdf_url):
                 if not processor:
-                    return "Please set API key first", []
+                    return "Please set API key first", gr.Gallery.update()
                 logger.info(f"Received inputs - PDF file: {pdf_file}, PDF URL: {pdf_url}")
                 if pdf_file is not None and hasattr(pdf_file, 'name'):
                     logger.info(f"Processing as uploaded PDF: {pdf_file.name}")
-                    return processor.ocr_uploaded_pdf(pdf_file)
+                    result, image_paths = processor.ocr_uploaded_pdf(pdf_file)
+                    gallery = gr.Gallery.update(value=[(p, os.path.basename(p)) for p in image_paths]) if image_paths else gr.Gallery.update()
+                    return result, gallery
                 elif pdf_url and pdf_url.strip():
                     logger.info(f"Processing as PDF URL: {pdf_url}")
-                    return processor.ocr_pdf_url(pdf_url)
-                return "Please upload a PDF or provide a valid URL", []
+                    result, image_paths = processor.ocr_pdf_url(pdf_url)
+                    gallery = gr.Gallery.update(value=[(p, os.path.basename(p)) for p in image_paths]) if image_paths else gr.Gallery.update()
+                    return result, gallery
+                return "Please upload a PDF or provide a valid URL", gr.Gallery.update()
 
             process_pdf_btn.click(
                 fn=process_pdf,
