@@ -344,5 +344,4 @@ if __name__ == "__main__":
     print(f"===== Application Startup at {os.environ['START_TIME']} =====")
     create_interface().launch(
         share=True,
-        debug=True,
     )
