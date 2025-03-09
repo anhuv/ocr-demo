@@ -297,10 +297,7 @@ def create_interface():
 
         # Examples
         gr.Examples(
-            examples=[
-                {"file_input": "receipt.png"},
-                {"url_input": "https://arxiv.org/pdf/2410.07073"}
-            ],
+            examples=[],
             inputs=[file_input, url_input]
         )
 
