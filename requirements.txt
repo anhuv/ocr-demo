@@ -4,3 +4,4 @@ pymupdf
 tenacity
 requests
 mistralai
+streamlit
